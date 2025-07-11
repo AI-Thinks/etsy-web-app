@@ -225,6 +225,20 @@ def main():
     st.title("🎨 Etsy Art Price & Sales Timeline Predictor")
     st.markdown("Upload an art image and provide details to get price estimates and predicted days until sale.")
     
+    # Sidebar with tips for better predictions
+    with st.sidebar:
+        st.markdown("### 💡 Tips for Better Predictions")
+        st.info(
+            "**Enhance your description with:**\n\n"
+            "• Artist background & experience\n"
+            "• Exhibition history\n"
+            "• Materials & quality details\n"
+            "• Shipping & return policies\n"
+            "• Unique selling points\n"
+            "• Reputation metrics\n\n"
+            "*More comprehensive descriptions lead to more accurate price predictions!*"
+        )
+    
     # Load models
     if not st.session_state.models_loaded:
         with st.spinner("Loading models... This may take a moment."):
@@ -267,8 +281,8 @@ def main():
         
         description = st.text_area(
             "Artwork Description",
-            placeholder="e.g., Beautiful abstract landscape painting with vibrant colors...",
-            help="Provide a detailed description of your artwork",
+            placeholder="e.g., Beautiful abstract landscape painting with vibrant colors, created with professional-grade oils on premium canvas. Artist has 10+ years experience with gallery exhibitions. Ships worldwide with insurance. 30-day return policy...",
+            help="💡 For more accurate predictions, include: artistic background, exhibition history, reputation metrics, materials quality, shipping & return policies, and unique selling points",
             height=100
         )
     
@@ -493,6 +507,15 @@ def main():
                     
             except Exception as e:
                 st.error(f"An error occurred during prediction: {str(e)}")
+    
+    # Advisory for better predictions
+    st.markdown("---")
+    st.info(
+        "💡 **For More Accurate Predictions:** Include details about your reputation metrics, "
+        "shipping policies, return policies, exhibition history, and artistic background in your "
+        "artwork description. The more comprehensive your description, the better our AI can "
+        "assess your artwork's market value."
+    )
     
     # Footer
     st.markdown("---")
