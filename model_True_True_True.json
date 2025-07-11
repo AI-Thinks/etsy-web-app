@@ -1,0 +1,7 @@
+{
+    "visual": true,
+    "texts": true,
+    "structured": true,
+    "encoder_model_name": "resnet34",
+    "state_dict": "model_params_True_True_True.pt"
+}
