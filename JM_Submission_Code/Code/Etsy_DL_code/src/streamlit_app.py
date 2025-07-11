@@ -519,7 +519,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.markdown("*This tool uses machine learning to estimate artwork prices and predict sales timing using an OLS regression model (R² = 0.643).*")
+    st.markdown("*This tool uses a multi-modal deep neural network to predict artwork prices and also predicts time-to-sell based on price and other factors using an OLS regression model*")
 
 if __name__ == "__main__":
     main() 
