@@ -364,19 +364,27 @@ def main():
             help="Average rating of the artist/shop"
         )
         
+        # Surface Material selection (single choice)
+        st.subheader("Surface Material")
+        surface_options = ["Canvas", "Other material"]
+        selected_surface = st.radio(
+            "Select the primary surface material of your artwork:",
+            options=surface_options,
+            index=0,
+            help="Choose the main surface material used in your artwork."
+        )
+        is_canvas = (selected_surface == "Canvas")
+        
         # Medium selection (single choice)
         st.subheader("Primary Medium")
-        medium_options = ["Canvas", "Oil", "Acrylic", "Mixed Media", "Other"]
+        medium_options = ["Oil", "Acrylic", "Mixed Media", "Other"]
         selected_medium = st.radio(
             "Select the primary medium of your artwork:",
             options=medium_options,
             index=0,
             help="Choose the main medium used in your artwork. 'Other' includes all other mediums not listed."
         )
-        
-        # Convert selection to individual flags
-        is_canvas = (selected_medium == "Canvas")
-        is_oil = (selected_medium == "Oil") 
+        is_oil = (selected_medium == "Oil")
         is_acrylic = (selected_medium == "Acrylic")
         is_mixed_media = (selected_medium == "Mixed Media")
         is_other = (selected_medium == "Other")
