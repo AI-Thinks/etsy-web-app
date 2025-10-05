@@ -30,12 +30,12 @@ from utils import get_hash, STRUCTURED_FEATURES, load_json, EMBEDDINGS_FILE_NAME
 from data2 import get_transforms
 
 # Constants
-MODEL_PATH = "/Users/nevinselby/Documents/UWMadison/DataAnalystIntern/Project 2/model_True_True_True.json"
+MODEL_PATH = "model_True_True_True.json"
 EMBEDDINGS_FILE = 'nevin/joint_embedding_dict.json'
 SCALER_MEAN = 5.44
 SCALER_VAR = 0.86
-COX_MODEL_PATH = "/Users/nevinselby/Documents/UWMadison/DataAnalystIntern/Project 2/JM_Submission_Code/Code/Etsy_DL_code/src/res_cox_fitted.rds"
-COX_MEDIANS_PATH = "/Users/nevinselby/Documents/UWMadison/DataAnalystIntern/Project 2/JM_Submission_Code/Code/Etsy_DL_code/src/cox_median_values.json"
+COX_MODEL_PATH = "JM_Submission_Code/Code/Etsy_DL_code/src/res_cox_fitted.rds"
+COX_MEDIANS_PATH = "JM_Submission_Code/Code/Etsy_DL_code/src/cox_median_values.json"
 
 # Cox Model Coefficients 
 COX_COEFFS = {
