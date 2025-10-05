@@ -69,7 +69,7 @@ if 'models_loaded' not in st.session_state:
 def load_models():
     """Load all required models and preprocessors"""
     try:
-        # Load CLIP model and processor
+        # Load image and text processing models
         clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
         
@@ -110,7 +110,7 @@ def load_embeddings():
     return load_json(EMBEDDINGS_FILE_NAME)
 
 def get_joint_embedding(image, title, description, clip_model, clip_processor):
-    """Generate joint CLIP embedding for image and text"""
+    """Generate joint embedding for image and text"""
     try:
         combined_text = f"{title}. {description}"
         
@@ -170,7 +170,7 @@ def predict_price(image, joint_embedding, structured_features, price_model, scal
         return None
 
 def predict_survival_curve(predicted_price, cox_features, cox_model, cox_medians):
-    """Predict days to sell using Cox Proportional Hazard model"""
+    """Predict days to sell using survival analysis model"""
     try:
         from rpy2.robjects import pandas2ri, numpy2ri, default_converter
         from rpy2.robjects.conversion import localconverter
@@ -255,9 +255,7 @@ def main():
     st.markdown("""
     ### Welcome to the AI-Powered Artwork Pricing & Sales Predictor
     
-    This tool uses state-of-the-art machine learning models to:
-    - **Predict optimal listing prices** using multi-modal deep learning (image + text)
-    - **Estimate time to sale** using Cox Proportional Hazard survival analysis
+    This tool estimates selling price and time to sale based on artwork features and artist reputation using advanced machine learning models.
     
     Simply upload your artwork image and provide details to get intelligent pricing recommendations!
     """)
@@ -748,23 +746,23 @@ def main():
     with col_info1:
         st.markdown("""
         **Price Prediction Model:**
-        - Multi-modal deep learning architecture
-        - Combines CLIP image embeddings with text descriptions
-        - Trained on thousands of Etsy art listings
+        - Advanced machine learning architecture
+        - Analyzes image and text features
+        - Trained on thousands of art listings
         - Incorporates artwork features and shop metrics
         """)
     
     with col_info2:
         st.markdown("""
         **Sales Timeline Model:**
-        - Cox Proportional Hazard survival analysis
-        - Accounts for censored data (unsold items)
+        - Advanced survival analysis techniques
+        - Accounts for market dynamics and timing
         - Model concordance: **0.763** (strong predictive power)
-        - Considers price, features, and market dynamics
+        - Considers price, features, and market conditions
         """)
     
     st.markdown("---")
-    st.caption("© 2025 | Built with Streamlit, PyTorch, and R | For academic research purposes")
+    st.caption("© 2025 | Built with advanced machine learning | For academic research purposes")
 
 if __name__ == "__main__":
     main() 
