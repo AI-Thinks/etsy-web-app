@@ -24,6 +24,3 @@ tqdm>=4.65.0
 # Optional (if used)
 statsmodels>=0.14.0
 wandb>=0.15.0
-
-# Additional dependencies for the project
-pathlib2>=2.3.7; python_version < '3.4'
