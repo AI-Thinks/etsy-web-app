@@ -5,13 +5,24 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import requests
-from transformers import CLIPProcessor, CLIPModel
 from sklearn.preprocessing import StandardScaler
 import pathlib
 import json
 import gzip
 import io
-import statsmodels.api as sm
+
+# Import transformers with error handling
+try:
+    from transformers import CLIPProcessor, CLIPModel
+except ImportError:
+    # Fallback import approach
+    import transformers
+    CLIPProcessor = transformers.CLIPProcessor
+    CLIPModel = transformers.CLIPModel
+
+# R integration
+import rpy2.robjects as ro
+from rpy2.robjects.packages import importr
 
 # Import from existing modules
 from model2 import Model
@@ -19,40 +30,28 @@ from utils import get_hash, STRUCTURED_FEATURES, load_json, EMBEDDINGS_FILE_NAME
 from data2 import get_transforms
 
 # Constants
-MODEL_PATH = "model_True_True_True.json"
+MODEL_PATH = "/Users/nevinselby/Documents/UWMadison/DataAnalystIntern/Project 2/model_True_True_True.json"
 EMBEDDINGS_FILE = 'nevin/joint_embedding_dict.json'
 SCALER_MEAN = 5.44
 SCALER_VAR = 0.86
+COX_MODEL_PATH = "/Users/nevinselby/Documents/UWMadison/DataAnalystIntern/Project 2/JM_Submission_Code/Code/Etsy_DL_code/src/res_cox_fitted.rds"
+COX_MEDIANS_PATH = "/Users/nevinselby/Documents/UWMadison/DataAnalystIntern/Project 2/JM_Submission_Code/Code/Etsy_DL_code/src/cox_median_values.json"
 
-# OLS Model Coefficients (from regression results)
-OLS_COEFFS = {
-    'const': 494.40,
-    'Final_Sold_Price': 0.02,
-    'Rating': -93.07,
-    'Review': -0.01,
-    'Is_Rare_Find': 3.84,
-    'Admirers': 0.00,
-    'Actual_Width': -0.79,
-    'Actual_Height': -0.22,
-    'Canvas': -25.81,
-    'Mixed_Media': 61.29,
-    'Oil': 12.36,
-    'Acrylic': 26.61,
-    'Framed': 1.44,
-    'week_2': 1.01,
-    'week_3': 28.50,
-    'week_4': 45.96,
-    'week_5': 87.64,
-    'week_6': 13.01,
-    'week_7': 69.93,
-    'week_8': 60.79,
-    'week_9': 13.35,
-    'week_10': 39.29,
-    'week_11': 16.95,
-    'week_12': 94.53,
-    'week_13': 44.98,
-    'week_14': 41.32,
-    'week_15': 42.87
+# Cox Model Coefficients 
+COX_COEFFS = {
+    'Actual_Price': -0.001456,
+    'max_discount_by_week': -9.966,
+    'Rating': 1.588,
+    'Review': -0.0003394,
+    'Is_Rare_Find': 0.6629,
+    'Admirers': -0.00002221,
+    'Actual_Width': 0.02412,
+    'Actual_Height': 0.03205,
+    'Canvas': 0.3330,
+    'Mixed_Media': 1.058,
+    'Oil': 0.2445,
+    'Acrylic': -0.7194,
+    'Framed': -0.6118
 }
 
 # Initialize session state for caching models
@@ -63,6 +62,8 @@ if 'models_loaded' not in st.session_state:
     st.session_state.price_model = None
     st.session_state.scaler = None
     st.session_state.val_transform = None
+    st.session_state.cox_model = None
+    st.session_state.cox_medians = None
 
 @st.cache_resource
 def load_models():
@@ -85,13 +86,25 @@ def load_models():
         # Get validation transform
         _, val_transform = get_transforms()
         
-        return clip_model, clip_processor, price_model, scaler, val_transform
+        # Load Cox model as R object without automatic conversion
+        from rpy2.robjects import default_converter
+        ro.conversion.set_conversion(default_converter)
+        
+        base = importr('base')
+        survival = importr('survival')
+        cox_model = base.readRDS(COX_MODEL_PATH)
+        
+        with open(COX_MEDIANS_PATH, 'r') as f:
+            cox_medians = json.load(f)
+        
+        return clip_model, clip_processor, price_model, scaler, val_transform, cox_model, cox_medians
         
     except Exception as e:
         st.error(f"Error loading models: {str(e)}")
-        return None, None, None, None, None
+        import traceback
+        st.error(traceback.format_exc())
+        return None, None, None, None, None, None, None
 
-# Load the compressed joint embedding dictionary at the top-level (or inside main if you prefer lazy loading)
 @st.cache_resource
 def load_embeddings():
     return load_json(EMBEDDINGS_FILE_NAME)
@@ -99,10 +112,8 @@ def load_embeddings():
 def get_joint_embedding(image, title, description, clip_model, clip_processor):
     """Generate joint CLIP embedding for image and text"""
     try:
-        # Combine title and description
         combined_text = f"{title}. {description}"
         
-        # Preprocess image and text
         inputs_image = clip_processor(images=image, return_tensors="pt")
         inputs_text = clip_processor(text=[combined_text], return_tensors="pt", padding=True, truncation=True)
         
@@ -110,11 +121,9 @@ def get_joint_embedding(image, title, description, clip_model, clip_processor):
             image_embedding = clip_model.get_image_features(**inputs_image)
             text_embedding = clip_model.get_text_features(**inputs_text)
 
-        # Normalize embeddings
         image_embedding /= image_embedding.norm(dim=-1, keepdim=True)
         text_embedding /= text_embedding.norm(dim=-1, keepdim=True)
 
-        # Combine both embeddings (image first, then text)
         joint_embedding = torch.cat((image_embedding, text_embedding), dim=-1)
         return joint_embedding.cpu().numpy()
         
@@ -130,7 +139,6 @@ def prepare_structured_features(feature_values):
             if feature_type == bool:
                 structured.append(float(value))
             else:
-                # Apply log transformation and scaling as done in training
                 if value > 0:
                     structured.append(np.log(value) / 100)
                 else:
@@ -145,18 +153,13 @@ def prepare_structured_features(feature_values):
 def predict_price(image, joint_embedding, structured_features, price_model, scaler, val_transform):
     """Predict price using the trained model"""
     try:
-        # Preprocess image
         img_tensor = val_transform(image).unsqueeze(0)
-        
-        # Prepare inputs
         joint_emb_tensor = torch.tensor(joint_embedding).float()
         structured_tensor = structured_features.unsqueeze(0)
         
-        # Make prediction
         with torch.no_grad():
             prediction = price_model(img_tensor, joint_emb_tensor, structured_tensor)
             
-        # Inverse transform and convert to price
         scaled_prediction = scaler.inverse_transform(prediction.detach().numpy())
         price = np.exp(scaled_prediction).item()
         
@@ -166,47 +169,73 @@ def predict_price(image, joint_embedding, structured_features, price_model, scal
         st.error(f"Error predicting price: {str(e)}")
         return None
 
-def predict_days_to_sell(predicted_price, ols_features):
-    """Predict days until sale using OLS model"""
+def predict_survival_curve(predicted_price, cox_features, cox_model, cox_medians):
+    """Predict days to sell using Cox Proportional Hazard model"""
     try:
-        features = {
-            'Final_Sold_Price': predicted_price, 
-            'Is_Rare_Find': 1 if ols_features['is_rare_find'] else 0,
-            'Rating': ols_features['rating'], 
-            'Review': ols_features['review_count'], 
-            'Admirers': ols_features['admirers'], 
-            'Actual_Width': ols_features['width'],  
-            'Actual_Height': ols_features['height'], 
-            'Canvas': 1 if ols_features['surface_canvas'] else 0,
-            'Mixed_Media': 1 if ols_features['medium_mixed_media'] else 0,
-            'Oil': 1 if ols_features['medium_oil'] else 0,
-            'Acrylic': 1 if ols_features['medium_acrylic'] else 0,
-            'Framed': 1 if ols_features['framed'] else 0,
+        from rpy2.robjects import pandas2ri, numpy2ri, default_converter
+        from rpy2.robjects.conversion import localconverter
+        
+        # Following Hazard Model Update.R lines 121-127: newdata only has covariates, NO start/stop/event
+        cox_data = {
+            'Actual_Price': predicted_price,
+            'max_discount_by_week': cox_features.get('max_discount_by_week', cox_medians['max_discount_by_week']),
+            'Rating': cox_features.get('rating', cox_medians['Rating']),
+            'Review': cox_features.get('review_count', cox_medians['Review']),
+            'Is_Rare_Find': cox_features.get('is_rare_find', cox_medians['Is_Rare_Find']),
+            'Admirers': cox_features.get('admirers', cox_medians['Admirers']),
+            'Actual_Width': cox_features.get('width', cox_medians['Actual_Width']),
+            'Actual_Height': cox_features.get('height', cox_medians['Actual_Height']),
+            'Canvas': cox_features.get('surface_canvas', cox_medians['Canvas']),
+            'Mixed_Media': cox_features.get('medium_mixed_media', cox_medians['Mixed_Media']),
+            'Oil': cox_features.get('medium_oil', cox_medians['Oil']),
+            'Acrylic': cox_features.get('medium_acrylic', cox_medians['Acrylic']),
+            'Framed': cox_features.get('framed', cox_medians['Framed'])
         }
         
-        # Add week dummies (default to week 1 if no specific week chosen)
-        week = ols_features.get('prediction_week', 1)
-        for w in range(2, 16):
-            features[f'week_{w}'] = 1 if week == w else 0
+        newdata_pd = pd.DataFrame([cox_data])
+        # Convert all to float as in R
+        newdata_pd = newdata_pd.astype(float)
         
-         # OLS prediction: days to sell
-
-        days_pred = OLS_COEFFS['const']
-
-        for var, coeff in OLS_COEFFS.items():
-            print("Inside for loop")
-            if var != 'const' and var in features:
-                print(var, coeff, features[var])
-                days_pred += coeff * features[var] 
-                print("days_pred:", days_pred)
+        with localconverter(default_converter + pandas2ri.converter + numpy2ri.converter):
+            sf_new = ro.r['survfit'](cox_model, newdata=newdata_pd)
+            names_list = list(sf_new.names())
+            
+            time_idx = names_list.index('time')
+            surv_idx = names_list.index('surv')
+            
+            times_r = sf_new[time_idx]
+            surv_r = sf_new[surv_idx]
+            
+            times = np.array(times_r)
+            surv_probs = np.array(surv_r)
         
-        # Apply reasonable bounds (keep predictions realistic)
-        days_pred = max(0.0, days_pred)
+        # Calculate median survival time
+        median_survival = None
+        for i in range(len(surv_probs)):
+            if surv_probs[i] <= 0.5:
+                if i == 0:
+                    median_survival = times[i]
+                else:
+                    median_survival = np.interp(0.5, [surv_probs[i-1], surv_probs[i]], [times[i-1], times[i]])
+                break
         
-        return days_pred
+        # Check if median was found or if survival curve doesn't reach 50%
+        if median_survival is None:
+            median_survival = None
+            last_survival_prob = surv_probs[-1] if len(surv_probs) > 0 else None
+        else:
+            last_survival_prob = None
+        
+        return {
+            'median_survival': median_survival,
+            'cox_data_used': cox_data,
+            'last_survival_prob': last_survival_prob
+        }
         
     except Exception as e:
-        st.error(f"Error predicting days to sell: {str(e)}")
+        st.error(f"Error predicting survival curve: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 def main():
@@ -223,7 +252,15 @@ def main():
     logging.getLogger("streamlit").setLevel(logging.ERROR)
     
     st.title("🎨 Etsy Art Price & Sales Timeline Predictor")
-    st.markdown("Upload an art image and provide details to get price estimates and predicted days until sale.")
+    st.markdown("""
+    ### Welcome to the AI-Powered Artwork Pricing & Sales Predictor
+    
+    This tool uses state-of-the-art machine learning models to:
+    - **Predict optimal listing prices** using multi-modal deep learning (image + text)
+    - **Estimate time to sale** using Cox Proportional Hazard survival analysis
+    
+    Simply upload your artwork image and provide details to get intelligent pricing recommendations!
+    """)
     
     # Sidebar with tips for better predictions
     with st.sidebar:
@@ -239,20 +276,21 @@ def main():
             "*More comprehensive descriptions lead to more accurate price predictions!*"
         )
     
-    # Load models
+    # Load models with progress indicator
     if not st.session_state.models_loaded:
-        with st.spinner("Loading models... This may take a moment."):
+        with st.spinner("🔄 Loading AI models... This may take a moment on first run."):
             models = load_models()
             if all(model is not None for model in models):
                 (st.session_state.clip_model, 
                  st.session_state.clip_processor, 
                  st.session_state.price_model, 
                  st.session_state.scaler, 
-                 st.session_state.val_transform) = models
+                 st.session_state.val_transform,
+                 st.session_state.cox_model,
+                 st.session_state.cox_medians) = models
                 st.session_state.models_loaded = True
-                st.success("Models loaded successfully!")
             else:
-                st.error("Failed to load models. Please check the file paths.")
+                st.error("❌ Failed to load models. Please ensure all model files are in the correct location.")
                 return
     
     # Create three columns for input
@@ -318,19 +356,27 @@ def main():
                 )
             else:  # float
                 if 'inches' in feature_name.lower():
+                    # Use median values from training data
+                    if 'width' in feature_name.lower():
+                        default_dimension = 18.0
+                    elif 'height' in feature_name.lower():
+                        default_dimension = 23.0
+                    else:
+                        default_dimension = 18.0
+                    
                     value = st.number_input(
                         feature_desc, 
                         min_value=0.1, 
-                        value=12.0, 
+                        value=default_dimension, 
                         step=0.1, 
                         key=feature_name
                     )
                 else:
-                    # Set realistic defaults for shop metrics
+                    # Set defaults based on median values from training data
                     if feature_name == 'number_of_reviews':
-                        default_value = 5000
+                        default_value = 172  # Median from training data
                     elif feature_name == 'admirers':
-                        default_value = 10000
+                        default_value = 870  # Median from training data
                     elif feature_name == 'sales':
                         default_value = 1000
                     else:
@@ -359,7 +405,7 @@ def main():
             "Artist/Shop Rating (1-5 stars)",
             min_value=1.0,
             max_value=5.0,
-            value=4.5,
+            value=5.0,  # Median from training data
             step=0.1,
             help="Average rating of the artist/shop"
         )
@@ -388,13 +434,6 @@ def main():
         is_acrylic = (selected_medium == "Acrylic")
         is_mixed_media = (selected_medium == "Mixed Media")
         is_other = (selected_medium == "Other")
-        
-        prediction_week = st.selectbox(
-            "Week since listing (1 = listing for the first time)",
-            options=list(range(1, 16)),
-            index=0,
-            help="Week since listing: 1 if you are listing the artwork for the first time, 2 if it's been listed for 1 week, etc."
-        )
     
     # Prediction button
     st.markdown("---")
@@ -402,16 +441,22 @@ def main():
     if st.button("🔮 Predict Price & Sales Timeline", type="primary", use_container_width=True):
         # Validate inputs
         if uploaded_file is None:
-            st.error("Please upload an artwork image.")
+            st.error("⚠️ Please upload an artwork image.")
             return
             
         if not title.strip():
-            st.error("Please provide an artwork title.")
+            st.error("⚠️ Please provide an artwork title.")
             return
             
         if not description.strip():
-            st.error("Please provide an artwork description.")
+            st.error("⚠️ Please provide an artwork description. A detailed description improves prediction accuracy.")
             return
+        
+        if len(description.strip()) < 20:
+            st.warning("💡 Your description is quite short. Consider adding more details for better predictions.")
+        
+        # Store inputs in session state for reuse
+        st.session_state.last_prediction_made = True
         
         # Make predictions
         with st.spinner("Analyzing your artwork and making predictions..."):
@@ -450,12 +495,12 @@ def main():
                 if predicted_price is None:
                     return
                 
-                # Prepare OLS features - reuse STRUCTURED_FEATURES where possible
-                ols_features = {
+                # Prepare Cox features - reuse STRUCTURED_FEATURES where possible
+                cox_features = {
                     # New inputs not in STRUCTURED_FEATURES
                     'rating': rating,
+                    'max_discount_by_week': 0.0,  # Hardcoded to 0 as per professor's instruction
                     'medium_mixed_media': is_mixed_media,
-                    'prediction_week': prediction_week,
                     
                     # Reuse from STRUCTURED_FEATURES
                     'is_rare_find': updated_feature_values[feature_keys.index('is_rare_find')],
@@ -471,50 +516,219 @@ def main():
                     'medium_acrylic': is_acrylic,
                 }
                 
-                # Predict days to sell
-                days_to_sell = predict_days_to_sell(predicted_price, ols_features)
+                # Generate survival curve using Cox model
+                survival_result = predict_survival_curve(
+                    predicted_price, 
+                    cox_features,
+                    st.session_state.cox_model,
+                    st.session_state.cox_medians
+                )
                 
-                if days_to_sell is None:
+                if survival_result is None:
                     return
                 
-                # Display results
-                st.success("Predictions completed!")
+                # Store results in session state
+                st.session_state.predicted_price = predicted_price
+                st.session_state.survival_result = survival_result
+                st.session_state.cox_features = cox_features
                 
-                # Create results columns
-                result_col1, result_col2 = st.columns([1, 1])
+                # Clear any previous custom results
+                st.session_state.show_custom_results = False
                 
-                with result_col1:
-                    st.metric(
-                        label="Estimated Price", 
-                        value=f"${predicted_price:.2f}",
-                        help="Predicted price based on image, text, and features"
-                    )
-                
-                with result_col2:
-                    st.metric(
-                        label="Days Until Sale", 
-                        value=f"{days_to_sell:.2f} days",
-                        help="Estimated days until the artwork sells (R² = 0.643)"
-                    )
-                
-                # Additional insights
-                st.markdown("### 📊 Sales Insights")
-                
-                insights_col1, insights_col2 = st.columns([1, 1])
-                
-                with insights_col1:
-                    st.metric(
-                        label="Price Range", 
-                        value=f"${predicted_price*0.8:.2f} - ${predicted_price*1.2:.2f}",
-                        help="Estimated price range (±20%)"
-                    )
-                
-                with insights_col2:
-                    pass
-                
-                    
             except Exception as e:
                 st.error(f"An error occurred during prediction: {str(e)}")
+    
+    # Display results if we have them in session state
+    if hasattr(st.session_state, 'predicted_price') and st.session_state.predicted_price is not None:
+        predicted_price = st.session_state.predicted_price
+        survival_result = st.session_state.survival_result
+        cox_features = st.session_state.cox_features
+        
+        st.markdown("---")
+        st.markdown("## 📊 Your Personalized Pricing Strategy")
+        
+        # MAIN PREDICTION - Very prominent at top
+        median_days = survival_result['median_survival']
+        
+        st.markdown("### 🎯 Your Listing Strategy")
+        
+        if median_days is not None:
+            st.info(f"""
+            **For ${predicted_price:.2f} as listing price, your artwork is expected to sell in approximately {median_days:.0f} days.**
+            
+            This means there's a 50% probability your artwork will sell within {median_days:.0f} days at this price point.
+            """)
+        else:
+            last_prob = survival_result.get('last_survival_prob')
+            if last_prob is not None:
+                prob_unsold_pct = last_prob * 100
+                st.warning(f"""
+                **For ${predicted_price:.2f} as listing price, the model predicts your artwork will likely take significantly longer than 200 days to sell.**
+                
+                At 200 days, there's still a {prob_unsold_pct:.0f}% probability the artwork remains unsold. The median time to sell (50% probability) exceeds the available prediction range.
+                
+                **Recommendation:** Consider features that drive faster sales, such as competitive pricing, stronger descriptions, better image quality, or targeting popular styles.
+                """)
+            else:
+                st.warning(f"""
+                **For ${predicted_price:.2f} as listing price, your artwork has a high likelihood of taking longer than 200 days to sell.**
+                
+                Consider adjusting your price or features to improve sales timeline.
+                """)
+        
+        # Show price and days in metrics side by side for quick reference
+        metric_col1, metric_col2 = st.columns([1, 1])
+        with metric_col1:
+            st.metric(
+                label="📌 Recommended Listing Price", 
+                value=f"${predicted_price:.2f}",
+                help="Predicted optimal price based on your artwork's image, description, and features"
+            )
+        with metric_col2:
+            if median_days is not None:
+                st.metric(
+                    label="⏱️ Expected Days to Sell", 
+                    value=f"{median_days:.0f} days",
+                    help="Median time until sale at the recommended price (50% probability)"
+                )
+            else:
+                last_prob = survival_result.get('last_survival_prob')
+                if last_prob is not None:
+                    st.metric(
+                        label="⏱️ Expected Days to Sell", 
+                        value=f">{200} days",
+                        help=f"At 200 days, {last_prob*100:.0f}% probability still unsold. Median exceeds prediction range."
+                    )
+                else:
+                    st.metric(
+                        label="⏱️ Expected Days to Sell", 
+                        value=">200 days",
+                        help="Sale may take longer than observed timeframe"
+                    )
+        
+        # INTERACTIVE EXPERIMENTATION SECTION
+        st.markdown("---")
+        st.markdown("### 🎲 Experiment with Different Pricing Strategies")
+        st.markdown("""
+        **Want to see how changing your listing price or offering discounts affects the time to sell?**
+        
+        Enter different values below to explore various scenarios while keeping all other artwork features the same.
+        """)
+        
+        exp_col1, exp_col2 = st.columns([1, 1])
+        
+        with exp_col1:
+            custom_price = st.number_input(
+                "Custom Listing Price ($)",
+                min_value=1.0,
+                value=float(predicted_price),
+                step=10.0,
+                key="custom_price_input",
+                help="Try different listing prices to see how it affects days to sell"
+            )
+        
+        with exp_col2:
+            custom_discount = st.number_input(
+                "Maximum Discount (as fraction, 0-1)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.0,
+                step=0.05,
+                key="custom_discount_input",
+                help="Enter discount as a fraction (e.g., 0.15 for 15% discount)"
+            )
+        
+        if st.button("🔄 Recalculate with Custom Price/Discount", type="secondary", key="recalculate_button"):
+            with st.spinner("Calculating new timeline..."):
+                try:
+                    # Store original values for comparison
+                    st.session_state.original_price = predicted_price
+                    st.session_state.original_median_days = median_days
+                    
+                    custom_cox_features = cox_features.copy()
+                    custom_cox_features['max_discount_by_week'] = float(custom_discount)
+                    
+                    custom_survival = predict_survival_curve(
+                        custom_price,
+                        custom_cox_features,
+                        st.session_state.cox_model,
+                        st.session_state.cox_medians
+                    )
+                    
+                    if custom_survival is not None:
+                        # Store custom results for display on rerun
+                        st.session_state.custom_price = custom_price
+                        st.session_state.custom_discount = custom_discount
+                        st.session_state.custom_median_days = custom_survival['median_survival']
+                        st.session_state.show_custom_results = True
+                        
+                        # Update main session state with new values so metrics update
+                        st.session_state.predicted_price = custom_price
+                        st.session_state.survival_result = custom_survival
+                        st.session_state.cox_features = custom_cox_features
+                        
+                        st.rerun()  # Rerun to show updated values in main display
+                        
+                except Exception as e:
+                    st.error(f"Error in recalculation: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
+        
+        # Display custom results if they exist (persists across reruns)
+        if hasattr(st.session_state, 'show_custom_results') and st.session_state.show_custom_results:
+            col_title, col_reset = st.columns([4, 1])
+            with col_title:
+                st.markdown("#### 📍 Updated Prediction")
+            with col_reset:
+                if st.button("↩️ Reset", help="Reset to original prediction"):
+                    # Clear custom results
+                    st.session_state.show_custom_results = False
+                    # Restore original values
+                    if hasattr(st.session_state, 'original_price'):
+                        st.session_state.predicted_price = st.session_state.original_price
+                    st.rerun()
+            
+            custom_median_days = st.session_state.custom_median_days
+            custom_price_display = st.session_state.custom_price
+            custom_discount_display = st.session_state.custom_discount
+            
+            if custom_median_days is not None:
+                # Calculate change from original
+                if hasattr(st.session_state, 'original_median_days') and st.session_state.original_median_days is not None:
+                    days_diff = custom_median_days - st.session_state.original_median_days
+                    pct_change = (days_diff / st.session_state.original_median_days) * 100
+                    
+                    if days_diff < 0:
+                        change_text = f"🟢 **{abs(days_diff):.0f} days faster** ({abs(pct_change):.1f}% improvement)"
+                    elif days_diff > 0:
+                        change_text = f"🔴 **{days_diff:.0f} days slower** ({pct_change:.1f}% slower)"
+                    else:
+                        change_text = "➡️ **Same timeline**"
+                else:
+                    change_text = ""
+                
+                st.success(f"""
+                **Updated prediction with ${custom_price_display:.2f} listing price and {custom_discount_display*100:.0f}% maximum discount:**
+                
+                **Expected days to sell: {custom_median_days:.0f} days**
+                
+                {change_text}
+                """)
+            else:
+                last_prob = survival_result.get('last_survival_prob')
+                if last_prob is not None:
+                    st.warning(f"""
+                    **For ${custom_price_display:.2f} as listing price with {custom_discount_display*100:.0f}% maximum discount:**
+                    
+                    At 200 days, there's still a {last_prob*100:.0f}% probability the artwork remains unsold.
+                    Sale may take longer than 200 days.
+                    """)
+                else:
+                    st.warning(f"""
+                    **For ${custom_price_display:.2f} as listing price with {custom_discount_display*100:.0f}% maximum discount:**
+                    
+                    Sale may take longer than 200 days.
+                    """)
     
     # Advisory for better predictions
     st.markdown("---")
@@ -525,9 +739,32 @@ def main():
         "assess your artwork's market value."
     )
     
-    # Footer
+    # Footer with model information
     st.markdown("---")
-    st.markdown("*This tool uses a multi-modal deep neural network to predict artwork prices and also predicts time-to-sell based on price and other factors using an OLS regression model*")
+    st.markdown("### 📊 About the Models")
+    
+    col_info1, col_info2 = st.columns(2)
+    
+    with col_info1:
+        st.markdown("""
+        **Price Prediction Model:**
+        - Multi-modal deep learning architecture
+        - Combines CLIP image embeddings with text descriptions
+        - Trained on thousands of Etsy art listings
+        - Incorporates artwork features and shop metrics
+        """)
+    
+    with col_info2:
+        st.markdown("""
+        **Sales Timeline Model:**
+        - Cox Proportional Hazard survival analysis
+        - Accounts for censored data (unsold items)
+        - Model concordance: **0.763** (strong predictive power)
+        - Considers price, features, and market dynamics
+        """)
+    
+    st.markdown("---")
+    st.caption("© 2025 | Built with Streamlit, PyTorch, and R | For academic research purposes")
 
 if __name__ == "__main__":
     main() 
