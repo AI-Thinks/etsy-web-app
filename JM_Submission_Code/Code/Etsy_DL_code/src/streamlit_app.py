@@ -604,6 +604,28 @@ def main():
                         help="Sale may take longer than observed timeframe"
                     )
         
+        # Suggested listing price range (±20%) shown before experimentation section
+        st.markdown("---")
+        st.markdown("### 💵 Suggested Listing Price Range")
+        suggested_low = max(1.0, predicted_price * 0.8)
+        suggested_high = predicted_price * 1.2
+        range_col1, range_col2, range_col3 = st.columns([1, 1, 2])
+        with range_col1:
+            st.metric(
+                label="Lower bound",
+                value=f"${suggested_low:.2f}"
+            )
+        with range_col2:
+            st.metric(
+                label="Upper bound",
+                value=f"${suggested_high:.2f}"
+            )
+        with range_col3:
+            st.info(
+                "This range reflects typical variability around the estimate. "
+                "Use it as a guide for setting list price while considering market factors."
+            )
+        
         # INTERACTIVE EXPERIMENTATION SECTION
         st.markdown("---")
         st.markdown("### 🎲 Experiment with Different Pricing Strategies")
@@ -611,6 +633,7 @@ def main():
         **Want to see how changing your listing price or offering discounts affects the time to sell?**
         
         Enter different values below to explore various scenarios while keeping all other artwork features the same.
+        The original model predictions above will remain unchanged for comparison.
         """)
         
         exp_col1, exp_col2 = st.columns([1, 1])
@@ -660,12 +683,7 @@ def main():
                         st.session_state.custom_median_days = custom_survival['median_survival']
                         st.session_state.show_custom_results = True
                         
-                        # Update main session state with new values so metrics update
-                        st.session_state.predicted_price = custom_price
-                        st.session_state.survival_result = custom_survival
-                        st.session_state.cox_features = custom_cox_features
-                        
-                        st.rerun()  # Rerun to show updated values in main display
+                        st.rerun()  # Rerun to show updated custom results
                         
                 except Exception as e:
                     st.error(f"Error in recalculation: {str(e)}")
@@ -681,9 +699,6 @@ def main():
                 if st.button("↩️ Reset", help="Reset to original prediction"):
                     # Clear custom results
                     st.session_state.show_custom_results = False
-                    # Restore original values
-                    if hasattr(st.session_state, 'original_price'):
-                        st.session_state.predicted_price = st.session_state.original_price
                     st.rerun()
             
             custom_median_days = st.session_state.custom_median_days
@@ -691,10 +706,11 @@ def main():
             custom_discount_display = st.session_state.custom_discount
             
             if custom_median_days is not None:
-                # Calculate change from original
-                if hasattr(st.session_state, 'original_median_days') and st.session_state.original_median_days is not None:
-                    days_diff = custom_median_days - st.session_state.original_median_days
-                    pct_change = (days_diff / st.session_state.original_median_days) * 100
+                # Calculate change from original model prediction
+                original_median_days = median_days  # Use the original model prediction from the main section
+                if original_median_days is not None:
+                    days_diff = custom_median_days - original_median_days
+                    pct_change = (days_diff / original_median_days) * 100
                     
                     if days_diff < 0:
                         change_text = f"🟢 **{abs(days_diff):.0f} days faster** ({abs(pct_change):.1f}% improvement)"
@@ -706,24 +722,27 @@ def main():
                     change_text = ""
                 
                 st.success(f"""
-                **Updated prediction with ${custom_price_display:.2f} listing price and {custom_discount_display*100:.0f}% maximum discount:**
+                **Custom Experiment Results:**
                 
-                **Expected days to sell: {custom_median_days:.0f} days**
+                **Price:** ${custom_price_display:.2f} | **Discount:** {custom_discount_display*100:.0f}% | **Days to Sell:** {custom_median_days:.0f} days
                 
-                {change_text}
+                **vs. Original Model Prediction:** {change_text}
                 """)
             else:
                 last_prob = survival_result.get('last_survival_prob')
                 if last_prob is not None:
                     st.warning(f"""
-                    **For ${custom_price_display:.2f} as listing price with {custom_discount_display*100:.0f}% maximum discount:**
+                    **Custom Experiment Results:**
+                    
+                    **Price:** ${custom_price_display:.2f} | **Discount:** {custom_discount_display*100:.0f}% | **Days to Sell:** >200 days
                     
                     At 200 days, there's still a {last_prob*100:.0f}% probability the artwork remains unsold.
-                    Sale may take longer than 200 days.
                     """)
                 else:
                     st.warning(f"""
-                    **For ${custom_price_display:.2f} as listing price with {custom_discount_display*100:.0f}% maximum discount:**
+                    **Custom Experiment Results:**
+                    
+                    **Price:** ${custom_price_display:.2f} | **Discount:** {custom_discount_display*100:.0f}% | **Days to Sell:** >200 days
                     
                     Sale may take longer than 200 days.
                     """)
